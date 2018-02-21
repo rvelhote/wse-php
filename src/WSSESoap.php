@@ -58,6 +58,9 @@ class WSSESoap
     const WSUNAME = 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0';
     const WSSEPFX = 'wsse';
     const WSUPFX = 'wsu';
+    const TOKEN_KEY_IDENTIFIER = 'key-identifier';
+    const TOKEN_REFERENCE = 'reference';
+    const TOKEN_X509DATA = 'x509data';
     private $soapNS, $soapPFX;
     private $soapDoc = null;
     private $envelope = null;
@@ -189,32 +192,81 @@ class WSSESoap
         return $token;
     }
 
-    public function attachTokentoSig($token)
+    public function attachTokentoSig($data, $type = self::TOKEN_REFERENCE)
     {
-        if (!($token instanceof DOMElement)) {
+        if ($type === self::TOKEN_REFERENCE && !($data instanceof DOMElement)) {
             throw new Exception('Invalid parameter: BinarySecurityToken element expected');
         }
-        $objXMLSecDSig = new XMLSecurityDSig();
-        if ($objDSig = $objXMLSecDSig->locateSignature($this->soapDoc)) {
-            $tokenURI = '#'.$token->getAttributeNS(self::WSUNS, 'Id');
-            $this->SOAPXPath->registerNamespace('secdsig', XMLSecurityDSig::XMLDSIGNS);
-            $query = './secdsig:KeyInfo';
-            $nodeset = $this->SOAPXPath->query($query, $objDSig);
-            $keyInfo = $nodeset->item(0);
-            if (!$keyInfo) {
-                $keyInfo = $objXMLSecDSig->createNewSignNode('KeyInfo');
-                $objDSig->appendChild($keyInfo);
-            }
 
-            $tokenRef = $this->soapDoc->createElementNS(self::WSSENS, self::WSSEPFX.':SecurityTokenReference');
-            $keyInfo->appendChild($tokenRef);
-            $reference = $this->soapDoc->createElementNS(self::WSSENS, self::WSSEPFX.':Reference');
+        $objXMLSecDSig = new XMLSecurityDSig();
+        if (!($objDSig = $objXMLSecDSig->locateSignature($this->soapDoc))) {
+            throw new Exception('Unable to locate digital signature');
+        }
+
+        // Attach a <wsse:KeyIdentifier> element that specifies the token data by means of a X.509 SubjectKeyIdentifier
+        // reference. A subject key identifier may only be used to reference an X.509v3 certificate.
+        $funcKeyIdentifier = function (&$tokenRef) {
+            throw new Exception('<wsse:KeyIdentifier> not implemented');
+        };
+
+        // Attach a <ds:X509Data> element that contains a <ds:X509IssuerSerial> element that uniquely identifies an
+        // end entity certificate by its X.509 Issuer and Serial Number.
+        $funcX509Data = function (&$tokenRef, $data) {
+            $X509Data = $this->soapDoc->createElementNS(XMLSecurityDSig::XMLDSIGNS, 'ds:X509Data');
+            $tokenRef->appendChild($X509Data);
+
+            $issuerSerial = $this->soapDoc->createElementNS(XMLSecurityDSig::XMLDSIGNS, 'ds:X509IssuerSerial');
+            $X509Data->appendChild($issuerSerial);
+
+            $issuerName = $this->soapDoc->createElementNS(XMLSecurityDSig::XMLDSIGNS, 'ds:X509IssuerName');
+            $dataNode = new DOMText($data['X509IssuerName']);
+            $issuerName->appendChild($dataNode);
+            $issuerSerial->appendChild($issuerName);
+
+            $serialNumber = $this->soapDoc->createElementNS(XMLSecurityDSig::XMLDSIGNS, 'ds:X509SerialNumber');
+            $dataNode = new DOMText($data['X509SerialNumber']);
+            $serialNumber->appendChild($dataNode);
+            $issuerSerial->appendChild($serialNumber);
+        };
+
+        // Attach a <wsse:Reference> element that references a local <wsse:BinarySecurityToken> element or a remote
+        // data source that contains the token data itself.
+        $funcTokenReference = function (&$tokenRef, $token) {
+            $tokenURI = '#' . $token->getAttributeNS(self::WSUNS, 'Id');
+            $reference = $this->soapDoc->createElementNS(self::WSSENS, self::WSSEPFX . ':Reference');
             $reference->setAttribute('ValueType', 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3');
             $reference->setAttribute('URI', $tokenURI);
             $tokenRef->appendChild($reference);
-        } else {
-            throw new Exception('Unable to locate digital signature');
+        };
+
+        $this->SOAPXPath->registerNamespace('secdsig', XMLSecurityDSig::XMLDSIGNS);
+        $query = './secdsig:KeyInfo';
+        $nodeset = $this->SOAPXPath->query($query, $objDSig);
+        $keyInfo = $nodeset->item(0);
+
+        if (!$keyInfo) {
+            $keyInfo = $objXMLSecDSig->createNewSignNode('KeyInfo');
+            $objDSig->appendChild($keyInfo);
         }
+
+        $tokenRef = $this->soapDoc->createElementNS(self::WSSENS, self::WSSEPFX . ':SecurityTokenReference');
+
+        switch ($type) {
+            case self::TOKEN_KEY_IDENTIFIER:
+                $funcKeyIdentifier($tokenRef);
+                break;
+
+            case self::TOKEN_X509DATA:
+                $funcX509Data($tokenRef, $data);
+                break;
+
+            case self::TOKEN_REFERENCE:
+            default:
+                $funcTokenReference($tokenRef, $data);
+                break;
+        }
+
+        $keyInfo->appendChild($tokenRef);
     }
 
     public function signSoapDoc($objKey, $options = null)
